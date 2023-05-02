@@ -11,12 +11,76 @@ import torch.nn as nn
 from torchvision.utils import save_image
 import time
 import numpy as np
-import os
+import os, sys
+import shutil
 import cv2
-os.environ["CUDA_VISIBLE_DEVICES"] = '0'
-
+import imageio
+import gc
+# os.environ["CUDA_VISIBLE_DEVICES"] = '0'
 
 print(f'now device is {device}')
+
+def copy_folder(src_folder, dst_folder):
+    if not os.path.exists(dst_folder):
+        os.makedirs(dst_folder)
+    for src_dir, dirs, files in os.walk(src_folder):
+        dst_dir = src_dir.replace(src_folder, dst_folder, 1)
+        if not os.path.exists(dst_dir):
+            os.makedirs(dst_dir)
+        for file_ in files:
+            if file_.endswith('.avi') or file_.endswith('.png') or file_.endswith('.mat'):
+                continue
+            src_file = os.path.join(src_dir, file_)
+            dst_file = os.path.join(dst_dir, file_)
+            if os.path.exists(dst_file):
+                # os.remove(dst_file)
+                continue
+            shutil.copy2(src_file, dst_dir)
+
+def read_ubfc_video(video_file):
+        """Reads a video file, returns frames(T,H,W,3) """
+        VidObj = cv2.VideoCapture(video_file)
+        VidObj.set(cv2.CAP_PROP_POS_MSEC, 0)
+        success, frame = VidObj.read()
+        frames = list()
+        while success:
+            frame = cv2.cvtColor(np.array(frame), cv2.COLOR_BGR2RGB)
+            frame = np.asarray(frame)
+            frames.append(frame)
+            success, frame = VidObj.read()
+        print(np.shape(frames))
+        return np.asarray(frames)
+
+# Resize back to original size
+def resize_to_original(frame, width, height):
+    return cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
+
+def face_detection(frame, use_larger_box=False, larger_box_coef=1.0):
+    """Face detection on a single frame.
+    Args:
+        frame(np.array): a single frame.
+        use_larger_box(bool): whether to use a larger bounding box on face detection.
+        larger_box_coef(float): Coef. of larger box.
+    Returns:
+        face_box_coor(List[int]): coordinates of face bouding box.
+    """
+    detector = cv2.CascadeClassifier('/playpen-nas-ssd/akshay/UNC_Google_Physio/MA-rPPG-Video-Toolbox/utils/haarcascade_frontalface_default.xml')
+    face_zone = detector.detectMultiScale(frame)
+    if len(face_zone) < 1:
+        print("ERROR: No Face Detected")
+        face_box_coor = [0, 0, frame.shape[0], frame.shape[1]]
+    elif len(face_zone) >= 2:
+        face_box_coor = np.argmax(face_zone, axis=0)
+        face_box_coor = face_zone[face_box_coor[2]]
+        print("Warning: More than one faces are detected(Only cropping the biggest one.)")
+    else:
+        face_box_coor = face_zone[0]
+    if use_larger_box:
+        face_box_coor[0] = max(0, face_box_coor[0] - (larger_box_coef - 1.0) / 2 * face_box_coor[2])
+        face_box_coor[1] = max(0, face_box_coor[1] - (larger_box_coef - 1.0) / 2 * face_box_coor[3])
+        face_box_coor[2] = larger_box_coef * face_box_coor[2]
+        face_box_coor[3] = larger_box_coef * face_box_coor[3]
+    return face_box_coor
 
 
 def train_transform():
@@ -118,9 +182,8 @@ def finetuning_train(opt, original=None, example=None):
     content_tf = train_transform()
     style_tf = train_transform()
 
-    if original != None:
-        content_images = content_tf(Image.open(
-            original).convert('RGB')).unsqueeze(0).to(device)
+    if 1:
+        content_images = content_tf(original).unsqueeze(0).to(device)
         content_images = content_images.repeat(opt.batch_size, 1, 1, 1)
     else:
         content_dataset = FlatFolderDataset(opt.content_dir, content_tf)
@@ -128,9 +191,8 @@ def finetuning_train(opt, original=None, example=None):
             content_dataset, batch_size=opt.batch_size,
             sampler=InfiniteSamplerWrapper(content_dataset),
             num_workers=opt.n_threads))
-    if example != None:
-        style_images = style_tf(Image.open(
-            example).convert('RGB')).unsqueeze(0).to(device)
+    if 1:
+        style_images = style_tf(example).unsqueeze(0).to(device)
         style_images = style_images.repeat(opt.batch_size, 1, 1, 1)
     else:
         style_dataset = FlatFolderDataset(opt.style_dir, style_tf)
@@ -153,7 +215,7 @@ def finetuning_train(opt, original=None, example=None):
             print("--------loading checkpoint----------")
             print("=> loading checkpoint '{}'".format(opt.pretrained))
             checkpoint = torch.load(opt.pretrained)
-            model.load_state_dict(checkpoint['state_dict'])
+            model.load_state_dict(checkpoint['state_dict'], strict=False)
         else:
             print("--------no checkpoint found---------")
     model.train()
@@ -251,6 +313,12 @@ def finetuning_train(opt, original=None, example=None):
             torch.save(state, "./"+opt.save_dir+"/" +
                        str(i)+"_finetuning_style_lut.pth")
 
+     # Clean-up
+    model.cpu()
+    del model, checkpoint
+    gc.collect()
+    torch.cuda.empty_cache()
+
 
 def get_lut(opt, original, example):
 
@@ -264,7 +332,7 @@ def get_lut(opt, original, example):
             print("--------loading checkpoint----------")
             print("=> loading checkpoint '{}'".format(opt.resume))
             checkpoint = torch.load(opt.resume)
-            opt.start_iter = checkpoint['iter']
+            # opt.start_iter = checkpoint['iter']
             model.load_state_dict(checkpoint['state_dict'])
 
         else:
@@ -274,10 +342,8 @@ def get_lut(opt, original, example):
     TVMN_temp = TVMN(opt.dim).to(device)
 
     content_tf2 = train_transform2()
-    content_images = content_tf2(Image.open(
-        original).convert('RGB')).unsqueeze(0).to(device)
-    style_images = content_tf2(Image.open(
-        example).convert('RGB')).unsqueeze(0).to(device)
+    content_images = content_tf2(original).unsqueeze(0).to(device)
+    style_images = content_tf2(example).unsqueeze(0).to(device)
 
     content_images = content_images.repeat(2, 1, 1, 1)
     style_images = style_images.repeat(2, 1, 1, 1)
@@ -287,15 +353,23 @@ def get_lut(opt, original, example):
     # save_image(stylized, "output_name.png", nrow=opt.batch_size)
 
     LUT = others.get("LUT")
+
+    # Clean-up
+    model.cpu()
+    del model, checkpoint
+    gc.collect()
+    torch.cuda.empty_cache()
+
     return LUT[:1]
 
 
-def draw_video(target_mask, original_path, reference_mask, corrected_mask, LUT):
+# def draw_video(target_mask, original_path, reference_mask, corrected_mask, LUT):
+def draw_video(target_mask, corrected_mask, LUT):
     sigmod_infer = nn.Sigmoid()
-    cap_target_src = cv2.VideoCapture(target_mask)
-    src_true, original = cap_target_src.read()
+    # cap_target_src = cv2.VideoCapture(target_mask)
+    # src_true, original = cap_target_src.read()
 
-    example = reference_mask
+    # example = reference_mask
 
     # 一些变换 toPIL&nb
 
@@ -303,36 +377,32 @@ def draw_video(target_mask, original_path, reference_mask, corrected_mask, LUT):
     content_tf = p_transform()
     TrilinearInterpo = TrilinearInterpolation()
 
-    Path(corrected_mask).parent.mkdir(parents=True, exist_ok=True)
-    cap_target = cv2.VideoCapture(target_mask)
-    cap_reference = content_tf(Image.open(
-        reference_mask).convert('RGB')).unsqueeze(0).to(device)
+    # Path(corrected_mask).parent.mkdir(parents=True, exist_ok=True)
+    # cap_target = cv2.VideoCapture(target_mask)
+    # cap_reference = content_tf(reference_mask).unsqueeze(0).to(device)
 
-    width = int(cap_target.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap_target.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fourcc = int(cap_target.get(cv2.CAP_PROP_FOURCC))
-    fps = cap_target.get(cv2.CAP_PROP_FPS) if fourcc else 0
+    # print(target_mask.shape)
+    # width = target_mask.shape[2]
+    # height = target_mask.shape[1]
+    # fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    fps = 30
 
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-
-    cap_corrected = cv2.VideoWriter(
-        corrected_mask, fourcc, fps, (width, height))
+    # cap_corrected = cv2.VideoWriter(
+        # corrected_mask, fourcc, fps, (width, height))
 
     # frame_count = int(cap_target.get(cv2.CAP_PROP_FRAME_COUNT))
-    frame_count = (cap_target.get(cv2.CAP_PROP_FRAME_COUNT))
+    frame_count = target_mask.shape[0]
 
     all_time = 0
     frame = 0
+    restyled_video = []
 
     try:
         with tqdm(desc=f"Frames", total=frame_count) as pbar:
-            while all(cap.isOpened() for cap in (cap_target, cap_corrected)):
-                ret_target, target = cap_target.read()
+            for i in range(frame_count):
+                target = target_mask[i]
 
-                if not ret_target:
-                    break
-
-                target = cv2.cvtColor(target, cv2.COLOR_BGR2RGB)
+                # target = cv2.cvtColor(target, cv2.COLOR_BGR2RGB)
                 target = Image.fromarray(target)
                 target = content_tf(target).unsqueeze(0).to(device)
 
@@ -353,29 +423,134 @@ def draw_video(target_mask, original_path, reference_mask, corrected_mask, LUT):
                 corrected = img_out.detach().cpu().numpy()*255
                 corrected = np.uint8(np.clip(corrected, 0, 255))
 
-                corrected = cv2.cvtColor(corrected, cv2.COLOR_RGB2BGR)
+                # corrected = cv2.cvtColor(corrected, cv2.COLOR_RGB2BGR)
 
-                cap_corrected.write(corrected)
+                restyled_video.append(corrected)
+                # cap_corrected.write(corrected)
                 pbar.update(1)
                 frame = frame + 1
             print(f'all fps: {fps/all_time}')
             average_time = 1000.0*all_time/frame  # ms
             print(f'average time: {average_time}')
     finally:
-        cap_target.release()
-        cap_corrected.release()
+        print('Saving video to: {}'.format(corrected_mask))
+        np.save(corrected_mask, restyled_video)
+        # cap_target.release()
+        # cap_corrected.release()
 
+def draw_img(original, dst, LUT):
+    content_tf2 = p_transform()
+    target = content_tf2(original).unsqueeze(0).to(device)
+
+    TrilinearInterpo = TrilinearInterpolation()
+    img_res = TrilinearInterpo(LUT, target)
+    img_out = img_res+target
+
+    save_image(img_out, dst, nrow=1)
 
 if __name__ == '__main__':
+
+    # python3 inference_finetuning_video.py --pretrained ./experiments/336999_style_lut.pth 
+    # --src_video /playpen-nas-hdd/UNC_Google_Physio/UBFC-rPPG/DATASET_2_backup/DATASET_2/train 
+    # --style_path /playpen-nas-ssd/akshay/UNC_Google_Physio/datasets/FFHQ_eg3d_dark_skin_tones 
+    # --dst_video /playpen-nas-ssd/akshay/UNC_Google_Physio/datasets/NLUT_UBFC_DST --max_iter 100
     opt = parser.parse_args()
 
-    original = opt.content_path
-    example = opt.style_path
-    src_video = opt.src_video
-    dst_video = opt.dst_video
+    copy_folder(opt.src_video, opt.dst_video)
 
-    finetuning_train(opt, original, example)
-    lut = get_lut(opt, original, example)
-    draw_video(src_video, original, example, dst_video, lut)
-    print('save to: {}'.format(dst_video))
+    source_list = sorted(os.listdir(opt.src_video))
+    style_list = sorted(os.listdir(opt.style_path))
+    output_list = sorted(os.listdir(opt.dst_video))
+
+    file_num = len(source_list)
+    choose_range = range(0, file_num)
+
+    pbar = tqdm(list(choose_range))
+
+    for i in choose_range:
+        source_name = os.fsdecode(source_list[i])
+        src_video = read_ubfc_video(os.path.join(opt.src_video, source_name, f'{source_name}_vid.avi'))
+
+        cropped_frames = []
+        face_region_all = []
+
+        # First, compute the median bounding box across all frames
+        for frame in src_video:
+            face_box = face_detection(frame, True, 2.0) # MAUBFC and others
+            face_region_all.append(face_box)
+        face_region_all = np.asarray(face_region_all, dtype='int')
+        face_region_median = np.median(face_region_all, axis=0).astype('int')
+
+        # Apply the median bounding box for cropping and subsequent resizing
+        for frame in src_video:
+            cropped_frame = frame[int(face_region_median[1]):int(face_region_median[1]+face_region_median[3]),
+                                int(face_region_median[0]):int(face_region_median[0]+face_region_median[2])]
+            resized_frame = resize_to_original(cropped_frame, np.shape(src_video)[2], np.shape(src_video)[1])
+            cropped_frames.append(resized_frame)
+
+        # Cropped source video
+        src_video = np.asarray(cropped_frames)
+
+        # Get a frame of the source video
+        original = Image.fromarray(src_video[0])
+
+        # Get random reference style
+        style_path = np.random.choice(style_list, 1)[0]
+        style_filename = os.fsdecode(style_path)  
+        style_name = os.path.splitext(style_filename)[0]  
+        example = Image.open(os.path.join(opt.style_path, style_path)).convert('RGB')
+
+        # Get destination path
+        dst_video = os.path.join(opt.dst_video, source_name, f'{source_name}_{style_name}_vid.npy')
+        # output_path = os.path.join(opt.dst_video, source_name, f'{source_name}_{style_name}_vid.npy')
+        # np.save(output_path, restyled_video)
+
+        finetuning_train(opt, original, example)
+        lut = get_lut(opt, original, example)
+        draw_video(src_video, dst_video, lut)
+
+    # content_video = read_ubfc_video(opt.src_video)
+
+    # original = opt.content_path
+    # example = opt.style_path
+    # src_video = opt.src_video
+    # dst_video = opt.dst_video
+
+    # print(original)
+    # print(example)
+    # print(src_video)
+    # print(dst_video)
+
+    # src_video = read_ubfc_video(opt.src_video)
+
+    # cropped_frames = []
+    # face_region_all = []
+
+    # # First, compute the median bounding box across all frames
+    # for frame in src_video:
+    #     face_box = face_detection(frame, True, 2.0) # MAUBFC and others
+    #     face_region_all.append(face_box)
+    # face_region_all = np.asarray(face_region_all, dtype='int')
+    # face_region_median = np.median(face_region_all, axis=0).astype('int')
+
+    # # Apply the median bounding box for cropping and subsequent resizing
+    # for frame in src_video:
+    #     cropped_frame = frame[int(face_region_median[1]):int(face_region_median[1]+face_region_median[3]),
+    #                         int(face_region_median[0]):int(face_region_median[0]+face_region_median[2])]
+    #     resized_frame = resize_to_original(cropped_frame, np.shape(src_video)[2], np.shape(src_video)[1])
+    #     cropped_frames.append(resized_frame)
+
+    # src_video = np.asarray(cropped_frames)
+    # imageio.mimwrite('./my_output/subject1_input.mp4', src_video, fps=30, codec='libx264')
+
+    # original = Image.fromarray(src_video[0])
+    # # original = Image.open('./my_content/subject_1_frame.png').convert('RGB')
+    # example = Image.open(opt.style_path).convert('RGB')
+    # dst_video = opt.dst_video
+
+    # finetuning_train(opt, original, example)
+    # lut = get_lut(opt, original, example)
+    # # draw_img(original, './my_output/subject1_out.png', lut)
+    # draw_video(src_video, dst_video, lut)
+    # print('save to: {}'.format(dst_video))
     

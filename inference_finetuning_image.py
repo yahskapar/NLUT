@@ -83,7 +83,7 @@ def finetuning_train(opt, original, example):
             print("--------loading checkpoint----------")
             print("=> loading checkpoint '{}'".format(opt.pretrained))
             checkpoint = torch.load(opt.pretrained)
-            model.load_state_dict(checkpoint['state_dict'])
+            model.load_state_dict(checkpoint['state_dict'], strict=False)
         else:
             print("--------no checkpoint found---------")
 
@@ -226,6 +226,9 @@ if __name__ == '__main__':
     original = opt.content_path
     example = opt.style_path
     dst = opt.output_path
+
+    print(original)
+    print(example)
 
     lut = finetuning_train(opt, original, example)
     lut = get_lut(opt, original, example)

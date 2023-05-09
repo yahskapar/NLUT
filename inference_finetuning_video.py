@@ -16,9 +16,114 @@ import shutil
 import cv2
 import imageio
 import gc
+from fp_model import BiSeNet
 # os.environ["CUDA_VISIBLE_DEVICES"] = '0'
 
 print(f'now device is {device}')
+
+def vis_parsing_maps(im, parsing_anno, stride, save_im=False, save_path='vis_results/parsing_map_on_im.jpg'):
+    # Colors for all 20 parts in BGR format
+    part_colors = [[255, 0, 0], [255, 85, 0], [255, 170, 0], # background (0), face, left eyebrow
+                   [255, 0, 85], [255, 0, 170], # right eyebrow, left eye
+                   [0, 255, 0], [85, 255, 0], [170, 255, 0], # right eye, [], left ear
+                   [0, 255, 85], [0, 255, 170], # right ear, []
+                   [0, 0, 255], [85, 0, 255], [170, 0, 255],  # nose, [], upper lip
+                   [0, 85, 255], [0, 170, 255], # lower lip, neck
+                   [255, 255, 0], [255, 255, 85], [255, 255, 170],  # [], clothing (16), hair (17)
+                   [255, 0, 255], [255, 85, 255], [255, 170, 255],  # hat (18)
+                   [0, 255, 255], [85, 255, 255], [170, 255, 255]]
+
+    # Modified olors for all 20 parts in BGR format - only background, clothes, accesories, hair, and rest of face
+    modified_part_colors = [[0, 0, 0], [255, 0, 0], [255, 0, 0], # background (0), face, left eyebrow
+                   [255, 0, 0], [0, 0, 255], # right eyebrow, left eye
+                   [0, 0, 255], [0, 0, 0], [255, 0, 0], # right eye, [], left ear
+                   [255, 0, 0], [0, 0, 0], # right ear, []
+                   [255, 0, 0], [0, 0, 0], [255, 0, 0],  # nose, [], upper lip
+                   [255, 0, 0], [255, 0, 0], # lower lip, neck
+                   [0, 0, 0], [0, 255, 255], [0, 255, 0],  # [], clothing (16), hair (17)
+                   [255, 0, 255], [0, 0, 0], [0, 0, 0],  # hat (18)
+                   [0, 0, 0], [0, 0, 0], [0, 0, 0]]
+
+    im = np.array(im)
+    vis_im = im.copy().astype(np.uint8)
+    vis_parsing_anno = parsing_anno.copy().astype(np.uint8)
+    vis_parsing_anno = cv2.resize(vis_parsing_anno, None, fx=stride, fy=stride, interpolation=cv2.INTER_NEAREST)
+    vis_parsing_anno_color = np.zeros((vis_parsing_anno.shape[0], vis_parsing_anno.shape[1], 3)) + 255
+
+    num_of_class = np.max(vis_parsing_anno)
+
+    # for pi in range(0, len(part_colors)):
+    #     index = np.where(vis_parsing_anno == pi)
+    #     vis_parsing_anno_color[index[0], index[1], :] = part_colors[pi]
+
+    for pi in range(0, len(modified_part_colors)):
+        index = np.where(vis_parsing_anno == pi)
+        vis_parsing_anno_color[index[0], index[1], :] = modified_part_colors[pi]
+
+    vis_parsing_anno_color = vis_parsing_anno_color.astype(np.uint8)
+    # print(vis_parsing_anno_color.shape, vis_im.shape)
+    vis_im = cv2.addWeighted(cv2.cvtColor(vis_im, cv2.COLOR_RGB2BGR), 0.0, vis_parsing_anno_color, 1.0, 0) # Change weighting since we don't care about visualization
+
+    # Save result or not
+    if save_im:
+        cv2.imwrite(save_path[:-4] +'.png', vis_parsing_anno)
+        cv2.imwrite(save_path, vis_im, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
+
+    return Image.fromarray(cv2.cvtColor(vis_im, cv2.COLOR_BGR2RGB))
+
+def get_seg(input_frame, model):
+    to_tensor = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+    ])
+    with torch.no_grad():
+        img = input_frame
+        # image = img.resize((512, 512), Image.BILINEAR)
+        image = img
+        img = to_tensor(image)
+        img = torch.unsqueeze(img, 0)
+        img = img.cuda()
+        out = model(img)[0]
+        parsing = out.squeeze(0).cpu().numpy().argmax(0)
+        # print(parsing)
+        # print(np.unique(parsing))
+
+    return vis_parsing_maps(image, parsing, stride=1)
+
+# Broken
+def get_rvm_seg(input_frame, rvm_net):
+    to_tensor = transforms.Compose([
+        transforms.ToTensor(),
+    ])
+
+    # Set initial recurrent states to None
+    rec = [None] * 4
+    with torch.no_grad():
+        img = input_frame
+        # image = img.resize((512, 512), Image.BILINEAR)
+        image = img
+        img = to_tensor(image)
+        print("Converted to tensor!")
+        img = torch.permute(img, (2, 0, 1))
+        print("Permuted!")
+        img = torch.unsqueeze(img, 0)
+        img = img.cuda()
+        print("Passed to device!")
+        print(torch.size(img))
+        fgr, pha, *rec = model(img, *rec, downsample_ratio=0.25)
+        print("Got pha!")
+
+        seg = (pha > 0.5).float()
+
+        # Convert the segmentation map to a NumPy array
+        seg_np = seg.squeeze(0).cpu().numpy()
+        print(np.shape(seg_np))
+        
+
+        # print(parsing)
+        # print(np.unique(parsing))
+
+    return seg_np
 
 def copy_folder(src_folder, dst_folder):
     if not os.path.exists(dst_folder):
@@ -364,7 +469,7 @@ def get_lut(opt, original, example):
 
 
 # def draw_video(target_mask, original_path, reference_mask, corrected_mask, LUT):
-def draw_video(target_mask, corrected_mask, LUT):
+def draw_video(target_mask, corrected_mask, LUT, face_parse_model):
     sigmod_infer = nn.Sigmoid()
     # cap_target_src = cv2.VideoCapture(target_mask)
     # src_true, original = cap_target_src.read()
@@ -401,6 +506,9 @@ def draw_video(target_mask, corrected_mask, LUT):
         with tqdm(desc=f"Frames", total=frame_count) as pbar:
             for i in range(frame_count):
                 target = target_mask[i]
+                original_image = np.copy(target)
+                target_seg = get_seg(target, face_parse_model)
+                # cv2.imwrite("Test_target_seg_frame.png", cv2.cvtColor(np.array(target_seg), cv2.COLOR_RGB2BGR))
 
                 # target = cv2.cvtColor(target, cv2.COLOR_BGR2RGB)
                 target = Image.fromarray(target)
@@ -423,9 +531,21 @@ def draw_video(target_mask, corrected_mask, LUT):
                 corrected = img_out.detach().cpu().numpy()*255
                 corrected = np.uint8(np.clip(corrected, 0, 255))
 
-                # corrected = cv2.cvtColor(corrected, cv2.COLOR_RGB2BGR)
+                # cv2.imwrite("Test_corrected_frame.png", cv2.cvtColor(corrected, cv2.COLOR_RGB2BGR))
+                # cv2.imwrite("Test_original_frame.png", cv2.cvtColor(original_image, cv2.COLOR_RGB2BGR))
 
-                restyled_video.append(corrected)
+                target_seg = np.array(target_seg)
+                # Get the skin mask from the target segmentation map
+                skin_mask = np.all(target_seg == [0, 0, 255], axis=-1)
+
+                # Replace the skin pixels in initial target with the skin pixels from the corrected output
+                original_image[np.where(skin_mask)] = corrected[np.where(skin_mask)]
+
+                corrected = cv2.cvtColor(corrected, cv2.COLOR_RGB2BGR)
+
+                # cv2.imwrite("Test_original_frame_after_replace.png", cv2.cvtColor(original_image, cv2.COLOR_RGB2BGR))
+                # exit()
+                restyled_video.append(original_image)
                 # cap_corrected.write(corrected)
                 pbar.update(1)
                 frame = frame + 1
@@ -437,6 +557,172 @@ def draw_video(target_mask, corrected_mask, LUT):
         np.save(corrected_mask, restyled_video)
         # cap_target.release()
         # cap_corrected.release()
+
+# def draw_video(target_mask, corrected_mask, LUT, face_parse_model):
+#     sigmod_infer = nn.Sigmoid()
+#     # cap_target_src = cv2.VideoCapture(target_mask)
+#     # src_true, original = cap_target_src.read()
+
+#     # example = reference_mask
+
+#     # 一些变换 toPIL&nb
+
+#     # LUT = infer(original_path, example)
+#     content_tf = p_transform()
+#     TrilinearInterpo = TrilinearInterpolation()
+
+#     # Path(corrected_mask).parent.mkdir(parents=True, exist_ok=True)
+#     # cap_target = cv2.VideoCapture(target_mask)
+#     # cap_reference = content_tf(reference_mask).unsqueeze(0).to(device)
+
+#     # print(target_mask.shape)
+#     # width = target_mask.shape[2]
+#     # height = target_mask.shape[1]
+#     # fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+#     fps = 30
+
+#     # cap_corrected = cv2.VideoWriter(
+#         # corrected_mask, fourcc, fps, (width, height))
+
+#     # frame_count = int(cap_target.get(cv2.CAP_PROP_FRAME_COUNT))
+#     frame_count = target_mask.shape[0]
+
+#     all_time = 0
+#     frame = 0
+#     restyled_video = []
+
+#     try:
+#         with tqdm(desc=f"Frames", total=frame_count) as pbar:
+#             initial_target = target_mask[0]
+#             initial_target_rvm = np.copy(initial_target)
+#             cv2.imwrite("Test_initial_target.png", cv2.cvtColor(initial_target, cv2.COLOR_RGB2BGR))
+
+#             initial_target_seg = get_seg(initial_target, face_parse_model)
+#             cv2.imwrite("Test_initial_target_seg_frame.png", cv2.cvtColor(np.array(initial_target_seg), cv2.COLOR_RGB2BGR))
+
+#             # print("I got here!")
+#             # initial_target_rvm_seg = get_rvm_seg(initial_target_rvm, rvm_net)
+
+#             # exit()
+
+#             target = Image.fromarray(initial_target)
+#             target = content_tf(target).unsqueeze(0).to(device)
+
+#             img_res = TrilinearInterpo(LUT, target)
+#             img_out = img_res+target
+#             img_out = torch.squeeze(img_out, dim=0)
+#             img_out = torch.permute(img_out, (1, 2, 0))
+
+#             corrected = img_out.detach().cpu().numpy()*255
+#             corrected = np.uint8(np.clip(corrected, 0, 255))
+
+#             cv2.imwrite("Test_corrected_frame.png", cv2.cvtColor(np.array(corrected), cv2.COLOR_RGB2BGR))
+
+#             initial_target = np.array(initial_target)
+#             corrected = np.array(corrected)
+#             initial_target_seg = np.array(initial_target_seg)
+#             print(initial_target_seg)
+
+#             # # Get the skin mask from the initial segmentation map
+#             # skin_mask = (initial_target_seg == [0, 0, 255])
+#             skin_mask = np.all(initial_target_seg == [0, 0, 255], axis=-1)
+
+#             print(np.shape(initial_target_seg))
+#             print(np.shape(skin_mask))
+
+#             print(initial_target[0,0,:])
+#             print(corrected[0,0,:])
+#             # Replace the skin pixels in initial target with the skin pixels from the corrected output
+#             # cv2.imwrite("Test_for_shading_map_target_2.png", cv2.cvtColor(initial_target, cv2.COLOR_RGB2BGR))
+#             new_target = np.copy(initial_target)
+#             # cv2.imwrite("Test_for_shading_map_target_2.png", cv2.cvtColor(initial_target, cv2.COLOR_RGB2BGR))
+#             new_target[np.where(skin_mask)] = corrected[np.where(skin_mask)]
+#             # cv2.imwrite("Test_for_shading_map_target_3.png", cv2.cvtColor(initial_target, cv2.COLOR_RGB2BGR))
+
+#             # save the corrected image
+#             # cv2.imwrite("Test_corrected_frame_seg_mod.png", cv2.cvtColor(new_target, cv2.COLOR_RGB2BGR))
+
+#             # cv2.imwrite("Test_for_shading_map_target.png", cv2.cvtColor(initial_target, cv2.COLOR_RGB2BGR))
+#             # cv2.imwrite("Test_for_shading_map_corrected.png", cv2.cvtColor(corrected, cv2.COLOR_RGB2BGR))
+#             # Convert images to float
+#             initial_target = np.float32(initial_target)
+#             corrected = np.float32(corrected)
+
+#             print(initial_target[0,0,:])
+#             print(corrected[0,0,:])
+
+#             # Divide original image by restyled image and ignore divide by zero errors
+#             # with np.errstate(divide='ignore', invalid='ignore'):
+#             shading_map = cv2.divide(corrected, initial_target)
+
+#             # Replace NaNs with 0
+#             shading_map[np.isnan(shading_map)] = 0
+
+#             # Replace inf values with the maximum non-inf value in the shading map
+#             max_val = np.max(shading_map[np.isfinite(shading_map)])
+#             shading_map[np.isinf(shading_map)] = max_val
+
+#             print(shading_map[0,0,:])
+#             print(np.max(shading_map))
+
+#             # # Save the shading map for visualization
+#             shading_map_norm = cv2.normalize(shading_map, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
+#             # cv2.imwrite("shading_map_opencv.png", shading_map_norm)
+
+#             print(np.max(shading_map_norm))
+#             print(shading_map_norm[0,0,:])
+
+#             # # Verify that the shading map is correct by trying to reconstruct restyled_img1
+#             # reconstructed_restyled_img1 = cv2.multiply(og_img1, shading_map)
+
+#             # # Now, apply the same shading_map to all frames in the original video
+#             # restyled_video = []
+#             # for frame in original_video:
+#             #     frame = np.float32(frame)
+#             #     restyled_frame = cv2.multiply(frame, shading_map)
+#             #     restyled_video.append(restyled_frame)
+#             #     cv2.imwrite("intermediate_restyled_video_frame.png", cv2.cvtColor(restyled_frame, cv2.COLOR_RGB2BGR))
+
+#             # # Save the restyled video as an npy file
+#             # restyled_video = np.uint8(restyled_video)
+
+#             for i in range(frame_count):
+#                 start_time = time.time()
+
+#                 # Apply shading map to each frame
+#                 target_seg = get_seg(target_mask[i], face_parse_model)
+#                 target = np.float32(target_mask[i])
+#                 cv2.imwrite("Test_loop_target_before_inpaint.png", cv2.cvtColor(np.array(target_mask[i]), cv2.COLOR_RGB2BGR))
+#                 restyled_frame = cv2.multiply(target, shading_map)
+
+#                 target = np.uint8(target)
+#                 restyled_frame = np.uint8(restyled_frame)
+#                 target_seg = np.array(target_seg)
+#                 # Get the skin mask from the target segmentation map
+#                 skin_mask = np.all(target_seg == [0, 0, 255], axis=-1)
+
+#                 # Replace the skin pixels in initial target with the skin pixels from the corrected output
+#                 target[np.where(skin_mask)] = restyled_frame[np.where(skin_mask)]
+
+#                 # 结束时间
+#                 end_time = time.time()
+#                 all_time = all_time+(end_time-start_time)
+
+#                 cv2.imwrite("Test_loop_restyled_frame.png", cv2.cvtColor(np.array(restyled_frame), cv2.COLOR_RGB2BGR))
+#                 cv2.imwrite("Test_loop_target_after_inpaint.png", cv2.cvtColor(np.array(target), cv2.COLOR_RGB2BGR))
+#                 restyled_video.append(target)
+#                 # cap_corrected.write(corrected)
+#                 pbar.update(1)
+#                 frame = frame + 1
+#             print(f'all fps: {fps/all_time}')
+#             average_time = 1000.0*all_time/frame  # ms
+#             print(f'average time: {average_time}')
+#     finally:
+#         print('Saving video to: {}'.format(corrected_mask))
+#         np.save(corrected_mask, np.uint8(restyled_video))
+#         exit()
+#         # cap_target.release()
+#         # cap_corrected.release()
 
 def draw_img(original, dst, LUT):
     content_tf2 = p_transform()
@@ -457,6 +743,16 @@ if __name__ == '__main__':
     opt = parser.parse_args()
 
     copy_folder(opt.src_video, opt.dst_video)
+
+    # Load the segmentation model on second GPU device
+    n_classes = 19
+    face_parse_model = BiSeNet(n_classes=n_classes)
+    face_parse_model.cuda()
+    face_parse_model.load_state_dict(torch.load('/playpen-nas-ssd/akshay/UNC_Google_Physio/lighting/face-parsing.PyTorch/79999_iter.pth'))
+    face_parse_model.eval()
+
+    # Load the pre-trained model for RVM if used
+    # rvm_net = torch.hub.load('PeterL1n/RobustVideoMatting', 'mobilenetv3').eval().cuda()
 
     source_list = sorted(os.listdir(opt.src_video))
     style_list = sorted(os.listdir(opt.style_path))
@@ -507,7 +803,7 @@ if __name__ == '__main__':
 
         finetuning_train(opt, original, example)
         lut = get_lut(opt, original, example)
-        draw_video(src_video, dst_video, lut)
+        draw_video(src_video, dst_video, lut, face_parse_model)
 
     # content_video = read_ubfc_video(opt.src_video)
 

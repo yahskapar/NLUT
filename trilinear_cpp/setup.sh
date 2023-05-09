@@ -1,1 +1,1 @@
-export CUDA_HOME=/usr/local/cuda && python setup.py install
+export CUDA_HOME=/usr/local/cuda && python3 setup.py install --user
